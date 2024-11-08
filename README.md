@@ -1,3 +1,5 @@
 Swerve_Control_Prototype.inoはステアリングホイール1個分のプログラム
+
 Swerve_Control_for_PS4ControllerはPS4コントローラを接続し、連続回転ができるポテンショメータを使うことを想定した独ステプログラム
+
   11/8時点では移動のみ可能。旋回はまだ備わっていない
