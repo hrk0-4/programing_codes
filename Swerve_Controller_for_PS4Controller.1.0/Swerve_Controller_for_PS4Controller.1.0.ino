@@ -82,7 +82,7 @@ int current_position_in_virtual_range[Number_of_Wheel];
 //
 int Number_of_adjustedWheel;
 //ホイールの初期角度
-const int original_position[Number_of_Wheel];
+int original_position[Number_of_Wheel];
 int difference_in_virtual_range[Number_of_Wheel];
 int difference[Number_of_Wheel];
 int target_position_in_virtual_range;
@@ -90,6 +90,7 @@ double target_output_of_steering[Number_of_Wheel];
 double current_output_of_steering[Number_of_Wheel];
 double target_output_of_wheel;
 double current_output_of_wheel;
+double target_angle_of_turning[Number_of_Wheel] = {-3*M_PI/4, -M_PI/4, M_PI/4, 3*M_PI/4};
 
 void setup() {
   //シリアル通信の周波数を設定
@@ -119,7 +120,7 @@ void loop() {
   }
   Number_of_adjustedWheel = 1;
 
-  if(PS4.isConnented()){
+  if(PS4.isConnected()){
     //旋回する場合
     if(PS4.L2() || PS4.R2()){
       if(PS4.L2()){
@@ -129,12 +130,72 @@ void loop() {
           //現在のホイールの正転方向の傾き[0,1023]の値を扱いやすくするため仮想的な範囲[-512,512]上の値に変換
           current_position_in_virtual_range[i] = slide_range(current_position_in_original_range[i], original_position[i]);
           Serial.printf("%d → %d\n",current_position_in_original_range[i], current_position_in_virtual_range[i]);
+          target_angle_of_turning[i] = target_angle_of_turning[i] / (2 * M_PI) * 1024;
+          Serial.printf("%f\n",target_angle_of_turning[i]);
+          //仮想的な範囲(-512,512]上での差の大きさをとる
+          difference_in_virtual_range[i] = fabs(target_angle_of_turning[i] - current_position_in_virtual_range[i]);
+          //差が768より大きい（または256未満）の場合,目標方向のベクトルとホイールの正転方向のベクトルが一致している（ほぼ）
+          if(difference_in_virtual_range[i] > 768)
+            difference_in_virtual_range[i] = 1024 - difference_in_virtual_range[i];
+          //ステアリングの最小角を調べるため各positionの値が負の時+512することで[0,512]で扱えるようにする
+          if(target_angle_of_turning[i] < 0)
+            target_angle_of_turning[i] = 512 + target_angle_of_turning[i];
+          //各positionの値が負の時+512することで[0,512]で扱えるようにする
+          if(current_position_in_virtual_range[i] < 0)
+            current_position_in_virtual_range[i] = 512 + current_position_in_virtual_range[i];
+          Serial.printf("|target| = %d, |current| = %d\n", target_angle_of_turning[i], current_position_in_virtual_range[i]);
+          //[0,512]内の目標位置と現在位置の差difference(-512,512)を算出
+          difference[i] = current_position_in_virtual_range[i] - target_angle_of_turning[i];
         }
-        difference_in_virtual_range[0] = fabs(target_position_in_virtual_range - current_position_in_virtual_range[0]);
-        difference_in_virtual_range[1] = fabs(target_position_in_virtual_range - current_position_in_virtual_range[1]);
-        difference_in_virtual_range[2] = fabs(target_position_in_virtual_range - current_position_in_virtual_range[2]);
-        difference_in_virtual_range[3] = fabs(target_position_in_virtual_range - current_position_in_virtual_range[3]);
-        
+        for(int i = 0; i < Number_of_Wheel; i++){
+          if(fabs(difference[i]) > 42){
+            //|difference|または512-|difference|（一方が必ず[0,255]）の小さい方を256を最大値とした割合として扱えるようにしてtarget_outputに入れる
+            target_output_of_steering[i] = fmin(fabs(difference[i]), fabs(512 - fabs(difference[i]))) / 256;
+            //急激な電流の変化を防ぐため出力を徐々にあげる
+            current_output_of_steering[i] = control_pwm_output(target_output_of_steering[i], current_output_of_steering[i]);
+            //
+            if(fabs(difference[i]) < 256){
+              //|difference|<256（つまり90°未満）ならばdifferenceの正負によってホイールの傾きと目標方向との位置関係がわかり,回転方向が一意的に決まる
+              digitalWrite(steering_motorR_Pin[i],(difference[i]) < 0);
+              digitalWrite(steering_motorL_Pin[i],(difference[i]) > 0);
+              ledcWrite(steering_motorPWM_Pin[i],int(current_output_of_steering[i] * 255));
+              //上記と同様に考えれる。
+            }else{
+              digitalWrite(steering_motorR_Pin[i],(difference[i]) > 0);
+              digitalWrite(steering_motorL_Pin[i],(difference[i]) < 0);
+              ledcWrite(steering_motorPWM_Pin[i],int(current_output_of_steering[i] * 255));
+            }
+          }
+        }
+        //|difference|<42ならば角度調節を終了し,旋回に移る
+        for(int i = 0; i < Number_of_Wheel; i++){
+          if(fabs(difference[i]) < 42)
+            Number_of_adjustedWheel += 1;
+        }
+        if(Number_of_adjustedWheel == 4){
+          for(int i = 0; i < Number_of_Wheel; i++){
+            //角度調節を終わらせる
+            ledcWrite(steering_motorPWM_Pin[i],0);
+            Serial.printf("%d  %d\n", current_position_in_virtual_range[i], target_position_in_virtual_range);
+          }
+          for(int i = 0; i < Number_of_Wheel; i++){
+            //駆動のモータの出力をベクトルの大きさrを元に考える,その際rの最大値で割って割合として扱う
+            target_output_of_wheel = max_velosity;
+            //徐々に出力をあげる
+            current_output_of_wheel = control_pwm_output(target_output_of_wheel, current_output_of_wheel);
+            //正転方向にまわす
+            if(difference_in_virtual_range[i] < 256){
+              digitalWrite(wheel_motorF_Pin[i],HIGH);
+              digitalWrite(wheel_motorR_Pin[i],LOW);
+              ledcWrite(wheel_motorPWM_Pin[i],int(current_output_of_wheel * max_velosity));
+            //反転方向に回す 
+            }else if(256 <= difference_in_virtual_range[i] && difference_in_virtual_range[i] < 768){
+              digitalWrite(wheel_motorF_Pin[i],LOW);
+              digitalWrite(wheel_motorR_Pin[i],HIGH);
+              ledcWrite(wheel_motorPWM_Pin[i],int(current_output_of_wheel * max_velosity));
+            }
+          }
+        } 
       }
     }
     //機体の直交座標上の目標方向の座標,各成分の速度ベクトル(x,y)
